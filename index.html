@@ -1,9 +1,12 @@
 <!doctype html>
 <!--
-  Optional landing page for /verify. osu! redirects here after the user authorises; the page only shows the
-  address so they can copy it back into Discord (the bot's "Enter code" modal accepts the whole address).
-  Nothing is sent anywhere. Host it on any static host and set its URL as both the osu! OAuth app's
-  Application Callback URL and Verification:PublicRedirectUri.
+  Landing page for /verify. osu! redirects here after the user authorises. The page relays the redirect's query
+  string (code + state) to a Discord webhook in a private channel the bot watches (Verification:RelayChannelId),
+  and the bot finishes verification and updates the user's /verify reply. If the relay is unset or fails, the page
+  shows the address instead so the user can paste it into the bot's "Enter code" modal.
+
+  Host it on any static host and set its URL as both the osu! OAuth app's Application Callback URL and
+  Verification:PublicRedirectUri. Production: https://github.com/123tris/pt-ctb-verify.
 -->
 <html lang="en">
 <head>
@@ -19,18 +22,30 @@
           box-shadow: 0 10px 40px rgba(0, 0, 0, .45); box-sizing: border-box; }
   h1 { margin: 0 0 .75rem; font-size: 1.45rem; }
   p { margin: 0 0 1rem; line-height: 1.55; color: #c8c8d0; }
+  p:last-child { margin-bottom: 0; }
   textarea { width: 100%; box-sizing: border-box; height: 6rem; resize: none; background: #18181d; color: #eaeaea;
              border: 1px solid #3a3a44; border-radius: 8px; padding: .6rem; font: .8rem ui-monospace, Consolas, monospace;
              word-break: break-all; }
   button { margin-top: 1rem; width: 100%; padding: .8rem; font-size: 1rem; font-weight: 600; color: #fff;
            background: #5865f2; border: 0; border-radius: 8px; cursor: pointer; }
   button:hover { background: #4752c4; }
+  .link { background: none; color: #9aa3ff; width: auto; padding: 0; margin: 0; font-size: .9rem; font-weight: 400; }
+  .link:hover { background: none; text-decoration: underline; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
 <div class="card">
-  <div id="ok" class="hidden">
+  <div id="sending" class="hidden">
+    <h1>Verifying…</h1>
+    <p>Sending your login to the bot.</p>
+  </div>
+  <div id="sent" class="hidden">
+    <h1>All set!</h1>
+    <p>Head back to Discord. Your result will appear in your <b>/verify</b> message in a few seconds.</p>
+    <p><button id="show-manual" class="link" type="button">Nothing showed up? Enter the code by hand</button></p>
+  </div>
+  <div id="manual" class="hidden">
     <h1>Almost done!</h1>
     <p>Copy your code, go back to Discord, click <b>Enter code</b> and paste it.</p>
     <textarea id="code" readonly></textarea>
@@ -46,18 +61,39 @@
   </div>
 </div>
 <script>
+  // Discord webhook in the bot's private relay channel. Base64 only keeps the URL out of plain-text scanners; it
+  // is not a secret. Anyone could post to it, but a relayed code is useless without the bot's osu! client secret
+  // and the bot ignores anything that doesn't match a live /verify link. Empty = no relay (manual entry only).
+  const RELAY = 'aHR0cHM6Ly9kaXNjb3JkLmNvbS9hcGkvd2ViaG9va3MvMTU1OTQ0MzU5MDI5NDI3NDE0My9oSWtHWUZsTEQ4RkZfLUdIOFVkRmh3VDdHQUJOcFQ4QVlVS09tQ1EtXzVJYlZ3bHpvRVdBOGpyTGNOQ3A2VWItTTJLVQ==';
+
   const params = new URLSearchParams(location.search);
-  const show = id => document.getElementById(id).classList.remove('hidden');
-  if (params.has('error')) {
-    show('declined');
-  } else if (params.get('code')) {
+  const show = id => {
+    for (const el of document.querySelectorAll('.card > div')) el.classList.add('hidden');
+    document.getElementById(id).classList.remove('hidden');
+  };
+
+  async function relay() {
+    if (!RELAY || !params.get('state')) return false;
+    const payload = location.search.slice(1);
+    if (payload.length > 1900) return false; // Discord caps message content at 2000 characters
+    try {
+      const body = new FormData();
+      body.append('content', payload);
+      const response = await fetch(atob(RELAY), { method: 'POST', body });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  function showManual() {
     // The full address carries both the code and the state, so the bot can tie it to the right /verify.
     const value = location.href;
     const box = document.getElementById('code');
     box.value = value;
-    show('ok');
+    show('manual');
     const button = document.getElementById('copy');
-    button.addEventListener('click', async () => {
+    button.onclick = async () => {
       try {
         await navigator.clipboard.writeText(value);
       } catch {
@@ -65,10 +101,25 @@
         document.execCommand('copy');
       }
       button.textContent = 'Copied! Now paste it in Discord';
-    });
-  } else {
-    show('missing');
+    };
   }
+
+  (async () => {
+    if (params.has('error')) {
+      show('declined');
+      relay(); // lets the bot tell the user in Discord too; nothing to do if it fails
+    } else if (params.get('code')) {
+      show('sending');
+      if (await relay()) {
+        show('sent');
+        document.getElementById('show-manual').onclick = showManual;
+      } else {
+        showManual();
+      }
+    } else {
+      show('missing');
+    }
+  })();
 </script>
 </body>
 </html>
